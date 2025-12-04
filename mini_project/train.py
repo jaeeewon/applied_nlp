@@ -2,6 +2,7 @@
 
 import evaluate
 import numpy as np
+import json
 from datasets import load_dataset, concatenate_datasets
 from transformers import (
     BartTokenizerFast,
@@ -10,8 +11,10 @@ from transformers import (
     Seq2SeqTrainer,
     Seq2SeqTrainingArguments,
     EarlyStoppingCallback,
+    TrainerCallback,
 )
 from typing import Any
+from noti import send_noti
 
 MODEL_NAME = "facebook/bart-large"
 DATASET_NAME = "jaeeewon/librispeech_phonemes"
@@ -20,7 +23,10 @@ USE_WORD_BOUNDARY = True
 WORD_BOUNDARY_TOKEN = "<WB>"
 PHONEME_LAMBDA = lambda x: f"<PH_{x}>"
 
-OUTPUT_DIR = "./bart_phoneme2text_wb"
+MAX_LENGTH_PHONEME = 512
+MAX_LENGTH_GRAPHEME = 128
+
+OUTPUT_DIR = "./bart_phoneme2text_wb_512_128"
 
 
 def build_tokenizer_and_model():
@@ -67,22 +73,40 @@ def preprocess_function_builder(tokenizer):
             if not USE_WORD_BOUNDARY:
                 tokens = [ph for ph in tokens if ph != WORD_BOUNDARY_TOKEN]
 
-            ph_str = "".join(tokens)
+            ph_str = " ".join(tokens)
             phoneme_sequences.append(ph_str)
 
-            texts.append(text)
+            texts.append(text.lower())
 
-        model_inputs = tokenizer(phoneme_sequences, padding=False, truncation=True)
-        # print(len(model_inputs.input_ids[0]))
-        # print(phoneme_sequences[0], model_inputs.input_ids[0])
+        model_inputs = tokenizer(phoneme_sequences, padding=False, truncation=True, max_length=MAX_LENGTH_PHONEME)
+        # print(len(model_inputs.input_ids[0]), phoneme_sequences[0], model_inputs.input_ids[0])
 
         with tokenizer.as_target_tokenizer():
-            labels = tokenizer(texts, padding=False, truncation=True)
+            labels = tokenizer(texts, padding=False, truncation=True, max_length=MAX_LENGTH_GRAPHEME)
 
         model_inputs["labels"] = labels["input_ids"]
         return model_inputs
 
     return preprocess_function
+
+
+class NotiCallback(TrainerCallback):
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if not state.is_world_process_zero:
+            return
+        if logs is None:
+            return
+
+        step = state.global_step
+        eval_loss = logs.get("eval_loss", None)
+
+        if eval_loss is None:
+            return
+
+        send_noti(
+            title=f"BART FFT WB={USE_WORD_BOUNDARY} step={step}",
+            message=json.dumps(logs),
+        )
 
 
 if __name__ == "__main__":
@@ -132,9 +156,14 @@ if __name__ == "__main__":
         if isinstance(predictions, tuple):
             predictions = predictions[0]
 
-        decoded_preds = tokenizer.batch_decode(predictions, skip_special_tokens=True)
+        preds = np.where(predictions != -100, predictions, tokenizer.pad_token_id)
+        decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
         labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
         decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
+
+        for i in range(3):
+            print("pred :", decoded_preds[i])
+            print("label:", decoded_labels[i])
 
         bleu = bleu_metric.compute(
             predictions=decoded_preds,
@@ -185,6 +214,7 @@ if __name__ == "__main__":
         gradient_accumulation_steps=1,
         label_smoothing_factor=0.1,
         report_to=["none"],
+        generation_max_length=MAX_LENGTH_GRAPHEME,
     )
 
     trainer = Seq2SeqTrainer(
@@ -195,7 +225,7 @@ if __name__ == "__main__":
         tokenizer=tokenizer,
         data_collator=data_collator,
         compute_metrics=compute_metrics,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
+        callbacks=[NotiCallback()],
     )
 
     trainer.train()
