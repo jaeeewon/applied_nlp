@@ -19,14 +19,14 @@ from noti import send_noti
 MODEL_NAME = "facebook/bart-large"
 DATASET_NAME = "jaeeewon/librispeech_phonemes"
 
-USE_WORD_BOUNDARY = True
+USE_WORD_BOUNDARY = False
 WORD_BOUNDARY_TOKEN = "<WB>"
 PHONEME_LAMBDA = lambda x: x # f"<PH_{x}>"
 
 MAX_LENGTH_PHONEME = 512
 MAX_LENGTH_GRAPHEME = 128
 
-OUTPUT_DIR = "./bart_phoneme2text_wb_512_128_keep_phoneme"
+OUTPUT_DIR = "./bart_phoneme2text_no_wb_512_128_keep_phoneme"
 
 
 def build_tokenizer_and_model():
