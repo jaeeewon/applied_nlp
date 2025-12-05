@@ -3,6 +3,7 @@
 import evaluate
 import numpy as np
 import json
+import argparse
 from datasets import load_dataset, concatenate_datasets
 from transformers import (
     BartTokenizerFast,
@@ -21,12 +22,16 @@ DATASET_NAME = "jaeeewon/librispeech_phonemes"
 
 USE_WORD_BOUNDARY = False
 WORD_BOUNDARY_TOKEN = "<WB>"
-PHONEME_LAMBDA = lambda x: x # f"<PH_{x}>"
+PHONEME_LAMBDA = lambda x: x  # f"<PH_{x}>"
 
 MAX_LENGTH_PHONEME = 512
 MAX_LENGTH_GRAPHEME = 128
 
-OUTPUT_DIR = "./bart_phoneme2text_no_wb_512_128_keep_phoneme"
+
+bleu_metric = evaluate.load("sacrebleu")
+wer_metric = evaluate.load("wer")
+cer_metric = evaluate.load("cer")
+rouge_metric = evaluate.load("rouge")
 
 
 def build_tokenizer_and_model():
@@ -109,47 +114,7 @@ class NotiCallback(TrainerCallback):
         )
 
 
-if __name__ == "__main__":
-    tokenizer, model, raw_datasets = build_tokenizer_and_model()
-
-    train_raw = concatenate_datasets(
-        [
-            raw_datasets["train.clean.100"],
-            raw_datasets["train.clean.360"],
-            raw_datasets["train.other.500"],
-        ]
-    )
-    eval_raw = concatenate_datasets(
-        [
-            raw_datasets["dev.clean"],
-            raw_datasets["dev.other"],
-        ]
-    )
-
-    preprocess_function = preprocess_function_builder(tokenizer)
-
-    columns_to_remove = ["id", "text", "phonemes"]
-
-    tokenized_train = train_raw.map(
-        preprocess_function,
-        batched=True,
-        remove_columns=columns_to_remove,
-        desc="tokenizing train set",
-    )
-    tokenized_eval = eval_raw.map(
-        preprocess_function,
-        batched=True,
-        remove_columns=columns_to_remove,
-        desc="tokenizing dev set",
-    )
-
-    data_collator = DataCollatorForSeq2Seq(tokenizer, model=model)
-
-    bleu_metric = evaluate.load("sacrebleu")
-    wer_metric = evaluate.load("wer")
-    cer_metric = evaluate.load("cer")
-    rouge_metric = evaluate.load("rouge")
-
+def build_compute_metrics(tokenizer):
     def compute_metrics(eval_pred):
         predictions, labels = eval_pred
 
@@ -192,9 +157,50 @@ if __name__ == "__main__":
             "rougeL": rouge["rougeL"],
         }
 
+    return compute_metrics
+
+
+def train(output_dir: str):
+    tokenizer, model, raw_datasets = build_tokenizer_and_model()
+
+    train_raw = concatenate_datasets(
+        [
+            raw_datasets["train.clean.100"],
+            raw_datasets["train.clean.360"],
+            raw_datasets["train.other.500"],
+        ]
+    )
+    eval_raw = concatenate_datasets(
+        [
+            raw_datasets["dev.clean"],
+            raw_datasets["dev.other"],
+        ]
+    )
+
+    preprocess_function = preprocess_function_builder(tokenizer)
+
+    columns_to_remove = ["id", "text", "phonemes"]
+
+    tokenized_train = train_raw.map(
+        preprocess_function,
+        batched=True,
+        remove_columns=columns_to_remove,
+        desc="tokenizing train set",
+    )
+    tokenized_eval = eval_raw.map(
+        preprocess_function,
+        batched=True,
+        remove_columns=columns_to_remove,
+        desc="tokenizing dev set",
+    )
+
+    data_collator = DataCollatorForSeq2Seq(tokenizer, model=model)
+
+    compute_metrics = build_compute_metrics(tokenizer)
+
     training_args = Seq2SeqTrainingArguments(
-        output_dir=OUTPUT_DIR,
-        overwrite_output_dir=True,
+        output_dir=output_dir,
+        overwrite_output_dir=False,
         evaluation_strategy="steps",
         save_strategy="steps",
         load_best_model_at_end=True,
@@ -232,6 +238,92 @@ if __name__ == "__main__":
     eval_metrics = trainer.evaluate()
     print("evaluation on dev:", eval_metrics)
 
-    trainer.save_model(OUTPUT_DIR)
-    tokenizer.save_pretrained(OUTPUT_DIR)
-    print(f"model and tokenizer saved to {OUTPUT_DIR}")
+    trainer.save_model(output_dir)
+    tokenizer.save_pretrained(output_dir)
+    print(f"model and tokenizer saved to {output_dir}")
+
+
+def eval_model(output_dir: str):
+    tokenizer, model, raw_datasets = build_tokenizer_and_model()
+    data_collator = DataCollatorForSeq2Seq(tokenizer, model=model)
+
+    splits = [
+        "dev.clean",
+        "dev.other",
+        "test.clean",
+        "test.other",
+    ]
+
+    preprocess_function = preprocess_function_builder(tokenizer)
+    compute_metrics = build_compute_metrics(tokenizer)
+
+    tokenized_splits = {}
+    columns_to_remove = ["id", "text", "phonemes"]
+
+    for split_name in splits:
+        tokenized = raw_datasets[split_name].map(
+            preprocess_function,
+            batched=True,
+            remove_columns=columns_to_remove,
+            desc=f"tokenizing {split_name}",
+        )
+        tokenized_splits[split_name] = tokenized
+
+    training_args = Seq2SeqTrainingArguments(
+        output_dir=output_dir,
+        do_train=False,
+        do_eval=True,
+        per_device_eval_batch_size=64,
+        predict_with_generate=True,
+        generation_max_length=MAX_LENGTH_GRAPHEME,
+        bf16=True,
+        fp16=False,
+        report_to=["none"],
+        dataloader_drop_last=False,
+    )
+
+    dummy_first_split = splits[0]
+    trainer = Seq2SeqTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=None,
+        eval_dataset=tokenized_splits[dummy_first_split],
+        tokenizer=tokenizer,
+        data_collator=data_collator,
+        compute_metrics=compute_metrics,
+    )
+
+    for split_name in splits:
+        split_key = split_name.replace(".", "_")
+
+        metrics = trainer.evaluate(
+            eval_dataset=tokenized_splits[split_name],
+            metric_key_prefix=split_key,
+        )
+
+        if trainer.is_world_process_zero():
+            print(f"===== results for {split_name} =====")
+            print(f"{split_name} BLEU   : {metrics[f'{split_key}_bleu']:.4f}")
+            print(f"{split_name} WER    : {metrics[f'{split_key}_wer']:.4f}")
+            print(f"{split_name} CER    : {metrics[f'{split_key}_cer']:.4f}")
+            print(f"{split_name} ROUGE1 : {metrics[f'{split_key}_rouge1']:.4f}")
+            print(f"{split_name} ROUGE2 : {metrics[f'{split_key}_rouge2']:.4f}")
+            print(f"{split_name} ROUGEL : {metrics[f'{split_key}_rougeL']:.4f}")
+            print()
+
+    if trainer.is_world_process_zero():
+        print("sucessfully finished evaluation for all splits")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", type=str, choices=["train", "eval"], default="eval", help="mode: train or eval")
+    parser.add_argument("--output_dir", type=str, required=True, help="output directory")
+    args = parser.parse_args()
+
+    mode = args.mode
+
+    if mode == "train":
+        train(args.output_dir)
+    elif mode == "eval":
+        eval_model(args.output_dir)
