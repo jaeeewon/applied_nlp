@@ -1,4 +1,4 @@
-# torchrun --nproc_per_node=4 train.py --mode <eval><train> --output_dir <model_dir>
+# torchrun --nproc_per_node=4 train.py --mode <eval><train><test> --output_dir <model_dir>
 
 import evaluate
 import numpy as np
@@ -15,6 +15,7 @@ from transformers import (
 )
 from typing import Any
 from noti import send_noti
+from g2p_en import G2p
 
 MODEL_NAME = "facebook/bart-large"
 DATASET_NAME = "jaeeewon/librispeech_phonemes"
@@ -159,7 +160,7 @@ def build_compute_metrics(tokenizer):
     return compute_metrics
 
 
-def train(output_dir: str):
+def train_model(output_dir: str):
     tokenizer, model, raw_datasets = build_tokenizer_and_model(MODEL_NAME)
 
     train_raw = concatenate_datasets(
@@ -314,15 +315,58 @@ def eval_model(output_dir: str):
         print("sucessfully finished evaluation for all splits")
 
 
+def test_model(output_dir: str):
+    g2p = G2p()
+    test_sentences = [
+        "I can see the ships sailing on the deep blue sea.",
+        "My son loves to play outside in the sun.",
+        "Please write your name on the right side of the paper.",
+        "Can you hear the music clearly from here?",
+        "The two of us went to the park, and she wanted to go too.",
+        "The brave knight rode his horse into the dark night.",
+        "She bought a new pair of shoes and ate a juicy pear.",
+        "He felt very weak for a whole week after the flu.",
+    ]
+    test_sentences = ["".join([ch for ch in sent if ch.isalpha() or ch.isspace()]).lower() for sent in test_sentences]
+    phonemes = [g2p(text) for text in test_sentences]
+
+    if not USE_WORD_BOUNDARY:
+        phonemes = [[ph for ph in ph_seq if ph != " "] for ph_seq in phonemes]
+
+    tokenizer, model, _ = build_tokenizer_and_model(output_dir)
+    inputs = tokenizer(
+        [" ".join([WORD_BOUNDARY_TOKEN if ph == " " else PHONEME_LAMBDA(ph) for ph in ph_seq]) for ph_seq in phonemes],
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=MAX_LENGTH_PHONEME,
+    )
+    outputs = model.generate(
+        inputs["input_ids"],
+        attention_mask=inputs["attention_mask"],
+        max_length=MAX_LENGTH_GRAPHEME,
+    )
+    decoded_outputs = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+
+    for text, decoded_output in zip(test_sentences, decoded_outputs):
+        print("TEXT   :", text)
+        print("OUTPUT :", decoded_output)
+        print()
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", type=str, choices=["train", "eval"], default="eval", help="mode: train or eval")
+    parser.add_argument(
+        "--mode", type=str, choices=["train", "eval", "test"], default="eval", help="mode: train or eval"
+    )
     parser.add_argument("--output_dir", type=str, required=True, help="output directory")
     args = parser.parse_args()
 
     mode = args.mode
 
     if mode == "train":
-        train(args.output_dir)
+        train_model(args.output_dir)
     elif mode == "eval":
         eval_model(args.output_dir)
+    elif mode == "test":
+        test_model(args.output_dir)
