@@ -1,4 +1,4 @@
-# torchrun --nproc_per_node=4 train.py
+# torchrun --nproc_per_node=4 train.py --mode <eval><train> --output_dir <model_dir>
 
 import evaluate
 import numpy as np
@@ -11,7 +11,6 @@ from transformers import (
     DataCollatorForSeq2Seq,
     Seq2SeqTrainer,
     Seq2SeqTrainingArguments,
-    EarlyStoppingCallback,
     TrainerCallback,
 )
 from typing import Any
@@ -34,9 +33,9 @@ cer_metric = evaluate.load("cer")
 rouge_metric = evaluate.load("rouge")
 
 
-def build_tokenizer_and_model():
-    tokenizer = BartTokenizerFast.from_pretrained(MODEL_NAME)
-    model = BartForConditionalGeneration.from_pretrained(MODEL_NAME)
+def build_tokenizer_and_model(model_name: str):
+    tokenizer = BartTokenizerFast.from_pretrained(model_name)
+    model = BartForConditionalGeneration.from_pretrained(model_name)
 
     raw_datasets = load_dataset(DATASET_NAME)
 
@@ -161,7 +160,7 @@ def build_compute_metrics(tokenizer):
 
 
 def train(output_dir: str):
-    tokenizer, model, raw_datasets = build_tokenizer_and_model()
+    tokenizer, model, raw_datasets = build_tokenizer_and_model(MODEL_NAME)
 
     train_raw = concatenate_datasets(
         [
@@ -244,7 +243,7 @@ def train(output_dir: str):
 
 
 def eval_model(output_dir: str):
-    tokenizer, model, raw_datasets = build_tokenizer_and_model()
+    tokenizer, model, raw_datasets = build_tokenizer_and_model(output_dir)
     data_collator = DataCollatorForSeq2Seq(tokenizer, model=model)
 
     splits = [
@@ -270,7 +269,7 @@ def eval_model(output_dir: str):
         tokenized_splits[split_name] = tokenized
 
     training_args = Seq2SeqTrainingArguments(
-        output_dir=output_dir,
+        output_dir=output_dir + "_eval",
         do_train=False,
         do_eval=True,
         per_device_eval_batch_size=64,
