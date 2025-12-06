@@ -55,7 +55,7 @@ def read_log_file(log_file):
 
 
 if __name__ == "__main__":
-    log_file = "251204_2133.log"
+    log_file = "251205_1214.log"
     train_loss, eval_loss, eval_bleu, eval_wer, eval_cer, eval_rougeL = read_log_file(log_file)
 
     plot_curves(train_loss, eval_loss, log_file.replace(".log", "_loss_wer.png"), val_any=eval_wer, any_name="WER")
